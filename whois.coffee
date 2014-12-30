@@ -16,14 +16,22 @@ AWS = require 'aws-sdk'
 delay = (time, fn, args...) ->
   setTimeout fn, time, args...
 
+delayedPromise = (time) ->
+  new Promise (fulfill) ->
+    delay time, () ->
+      console.log "I'm tired of waiting!"
+      fulfill "timer"
 
 ldap_settings =
   url: 'ldap://dc3.dealerdotcom.corp'
 bindDn = 'OU=Earthlings,OU=People,DC=dealerdotcom,DC=corp'
 thumbBase = if process.env.HUBOT_LOCAL_MODE then 'http://apps.local.dealer.ddc/thumb' else 'http://answers.dealer.ddc/thumb'
 # s3Base    = 'http://dealerbot-thumbnails.s3-website-us-east-1.amazonaws.com'
-s3Base = 'https://s3.amazonaws.com/dealerbot-thumbnails'
-promises = []
+s3Base = "https://#{process.env.HUBOT_AWS_S3_BUCKET ? "dealerbot-thumbnails"}.s3.amazonaws.com" # https://s3.amazonaws.com/dealerbot-thumbnails'
+pendingPromises = []
+ldap_image_str = null
+hipchat_image_str = null
+gravatar_image_str = null
 
 AWS.config =
   apiVersions:
@@ -39,7 +47,7 @@ s3 = new AWS.S3
 console.log "S3 : " + util.inspect(s3) + "\n"
 
 module.exports = (robot) ->
-  robot.respond /bucket list/i, (msg) ->
+  robot.respond /listBuckets/i, (msg) ->
     console.log "list all buckets"
     s3.listBuckets (err, data) ->
       if err
@@ -55,7 +63,7 @@ module.exports = (robot) ->
     else
       msg.send "no argument provided.  (eg. hash email@address.com)"
 
-  robot.respond /bucket(.*) list$/i, (msg) ->
+  robot.respond /bucket(.*) listObjects$/i, (msg) ->
     bucket = if msg.match[1] then msg.match[1] else if  process.env.HUBOT_AWS_S3_BUCKET then process.env.HUBOT_AWS_S3_BUCKET else "dealerbot-thumbnails"
     bucket = bucket.trim()
     console.log "listing contents of bucket named '#{bucket}'"
@@ -89,7 +97,7 @@ module.exports = (robot) ->
       else
         console.log "returned: " + util.inspect(data) + "\n"
 
-  robot.respond /bucket head(.*)$/i, (msg) ->
+  robot.respond /headBucket(.*)$/i, (msg) ->
     bucket = if msg.match[1] then msg.match[1] else if  process.env.HUBOT_AWS_S3_BUCKET then process.env.HUBOT_AWS_S3_BUCKET else "dealerbot-thumbnails"
     bucket = bucket.trim()
     console.log "checking for bucket named '#{bucket}'"
@@ -99,7 +107,7 @@ module.exports = (robot) ->
       else
         console.log "returned: " + util.inspect(data) + "\n"
 
-  robot.respond /bucket acl(.*)$/i, (msg) ->
+  robot.respond /getBucketAcl(.*)$/i, (msg) ->
     bucket = if msg.match[1] then msg.match[1] else if  process.env.HUBOT_AWS_S3_BUCKET then process.env.HUBOT_AWS_S3_BUCKET else "dealerbot-thumbnails"
     bucket = bucket.trim()
     console.log "checking for bucket named '#{bucket}'"
@@ -109,7 +117,7 @@ module.exports = (robot) ->
       else
         console.log "returned: " + util.inspect(data) + "\n"
 
-  robot.respond /bucket location(.*)$/i, (msg) ->
+  robot.respond /getBucketLocation(.*)$/i, (msg) ->
     bucket = if msg.match[1] then msg.match[1] else if  process.env.HUBOT_AWS_S3_BUCKET then process.env.HUBOT_AWS_S3_BUCKET else "dealerbot-thumbnails"
     bucket = bucket.trim()
     console.log "checking for bucket named '#{bucket}'"
@@ -138,6 +146,11 @@ module.exports = (robot) ->
 
     if userID == 'your daddy' || userID == 'your creator'
       return
+
+    emailCheck = userID.match '^.* <(.*@.*)>$'
+    if emailCheck
+      console.log "Sub Match: #{emailCheck[1]}"
+      userID = emailCheck[1]
 
     client = ldap.createClient ldap_settings
     resp_str = ''
@@ -182,15 +195,15 @@ module.exports = (robot) ->
           for attr in entry.attributes
 
             if attr.type == 'cn' and attrOrder == 'cn'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Name: ' + attr.vals.join(',\n ') + '\n'
 
             else if attr.type == 'title' and attrOrder == 'title'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Title: ' + attr.vals.join(',\n ') + '\n'
 
             else if attr.type == 'department' and attrOrder == 'department'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               department = attr.vals.join(',\n ')
               if department == 'Dealertrack'
                 isDealerTrack = true
@@ -199,7 +212,7 @@ module.exports = (robot) ->
               resp_str += 'Department: ' + department + '\n'
 
             else if attr.type == 'mail' and attrOrder == 'mail'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               email = attr.vals.join(',\n ')
 
               if isDealerTrack
@@ -209,6 +222,7 @@ module.exports = (robot) ->
               email_hash = fairmont.md5(email.trim().toLowerCase())
 
               gravatar_image_str = "http://www.gravatar.com/avatar/#{email_hash}.jpg?d=identicon"
+              console.log "  GRAVATAR THUMBNAIL :: #{gravatar_image_str}"
 
               httprequest = msg.http("https://api.hipchat.com/v2/user/#{email}?auth_token=" + process.env.HUBOT_HIPCHAT_TOKEN)
               hipchat_promise = new Promise (resolve, reject) ->
@@ -221,64 +235,88 @@ module.exports = (robot) ->
                     userInfo = JSON.parse(body)
                     if userInfo.photo_url and userInfo.photo_url isnt "https://www.hipchat.com/img/silhouette_125.png"
                       hipchat_image_str = userInfo.photo_url
+                      console.log "  FOUND HIPCHAT THUMBNAIL:: #{hipchat_image_str}"
                     resolve "hipchat"
-              promises.push hipchat_promise
+              pendingPromises.push hipchat_promise
 
             else if attr.type == 'thumbnailPhoto' and attrOrder == 'thumbnailPhoto'
-              # console.log("attr: " + util.inspect(attr) + "\n")
-              # console.log("hash: #{email_hash}"
+              console.log "attr: thumbnailPhoto\n"
+              console.log "hash: #{email_hash}"
               if process.env.HUBOT_INCLUDE_LDAP_IMAGE isnt "false"
                 if process.env.HUBOT_LOCAL_THUMBNAILS isnt "false"
                   robot.brain.set "thumb-#{email_hash}", attr.buffers[0]
                   ldap_image_str = thumbBase + "/#{email_hash}.jpg"
+                  console.log "  ROBOT LDAP :: #{ldap_image_str}"
                 else
-                  ldap_promise = new Promise (resolve, reject) ->
-
-                    buffer = new Buffer attr.buffers[0]
-                    ldap_image_str = s3Base + "/#{email_hash}.jpg"
-                    upload_params =
-                      ACL: 'public-read'
-                      ContentEncoding: 'image/jpeg'
-                      Bucket: process.env.HUBOT_AWS_S3_BUCKET
+                  console.log "Looking for LDAP thumbnail"
+                  ldap_promise = new Promise (resolve1) ->
+                    check_params =
+                      Bucket: process.env.HUBOT_AWS_S3_BUCKET ? "dealerbot-thumbnails"
                       Key: "#{email_hash}.jpg"
-                      Body: buffer
-                    s3.upload upload_params, (err, res) ->
-                      if err
-                        console.log 'Failed to upload thumbnail to Amazon S3, ' + util.inspect(err) + "\n"
-                        reject 'ldap'
+                    s3.headObject check_params, (headCheckError, headCheckResult) ->
+                      if headCheckError
+                        console.log "Unable to find #{email_hash}.jpg"
+                        resolve1 null
                       else
-                        console.log 'Uploaded thumbnail to Amazon S3, ' + util.inspect(res) + "\n"
-                        resolve "ldap"
-                  promises.push ldap_promise
+                        console.log 'HeadCheck returned, ' + util.inspect(headCheckResult) + "\n"
+                        console.log "Found #{email_hash}.jpg"
+                        ldap_image_str = s3Base + "/#{email_hash}.jpg"
+                        console.log "  EXISTING S3 LDAP :: #{ldap_image_str}"
+                        resolve1 'found ldap'
+
+                  .then (s3GetResolution) ->
+                    new Promise (resolve2, reject2) ->
+                      if s3GetResolution isnt null
+                        console.log "Using found thumbnail"
+                        resolve2 'found ldap'
+                      else
+                        console.log "Saving new thumbnail to S3"
+                        buffer = new Buffer attr.buffers[0]
+                        upload_params =
+                          ACL: 'public-read'
+                          ContentEncoding: 'image/jpeg'
+                          Bucket: process.env.HUBOT_AWS_S3_BUCKET ? "dealerbot-thumbnails"
+                          Key: "#{email_hash}.jpg"
+                          Body: buffer
+                        s3.upload upload_params, (uploadError, uploadResult) ->
+                          if uploadError
+                            console.log 'Failed to upload thumbnail to Amazon S3, ' + util.inspect(uploadError) + "\n"
+                            reject2 'ldap upload failed'
+                          else
+                            console.log 'Uploaded thumbnail to Amazon S3, ' + util.inspect(uploadResult) + "\n"
+                            ldap_image_str = uploadResult.Location
+                            console.log "  UPLOADED S3 LDAP :: #{ldap_image_str}"
+                            resolve2 'new ldap'
+                  pendingPromises.push ldap_promise
 
             else if attr.type == 'telephoneNumber' and attrOrder == 'telephoneNumber'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Ext: ' + attr.vals.join(',\n ') + '\n'
 
             else if attr.type == 'mobile' and attrOrder == 'mobile'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Mobile: ' + attr.vals.join(',\n ') + '\n'
 
             else if attr.type == 'st' and attrOrder == 'st'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               state = 'State: ' + attr.vals.join(',\n ') + '\n'
 
             else if attr.type == 'physicalDeliveryOfficeName' and attrOrder == 'physicalDeliveryOfficeName'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               [ state, city, address ] = attr.vals.join(',\n ').split(" > ")
               address = "Location: #{address}, #{city}  #{state}\n"
 
               resp_str += address or state
 
             else if attr.type == 'manager' and attrOrder == 'manager'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Manager: ' + attr.vals.join(',\n ').replace('CN=', '').replace(',OU=Earthlings,OU=People,DC=dealerdotcom,DC=corp', '') + '\n'
 
             else if attr.type == 'directReports' and attrOrder == 'directReports'
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
 
             else if attr.type == 'sAMAccountName' and attrOrder == 'sAMAccountName' and isDealerTrack == false
-              # console.log("attr: " + JSON.stringify(attr) + "\n")
+              console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Map: http://maps.dealer.ddc/maps/locate/' + attr.vals.join(',\n ') + '\n'
 
 
@@ -287,7 +325,15 @@ module.exports = (robot) ->
           msg.send "No employees were found based on your search, \"#{userID}\""
         else
           msg.send resp_str
-          Promise.all(promises).then () ->
+          console.log "There should be a thumbnail."
+          console.log "  LDAP :: #{ldap_image_str}"
+          console.log "  HIPCHAT :: #{hipchat_image_str}"
+          console.log "  GRAVATAR :: #{gravatar_image_str}"
+          console.log "#{pendingPromises.length} pending promises"
+          # pendingPromises.push delayedPromise(5000)
+
+          Promise.all(pendingPromises).done () ->
+            console.log "All pending promises satisfied"
             if process.env.HUBOT_IMAGE_PRIORITY is "hipchat"
               msg.send hipchat_image_str or ldap_image_str or gravatar_image_str
             else
