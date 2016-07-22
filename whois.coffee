@@ -44,8 +44,9 @@ AWS.config =
 
 s3 = new AWS.S3
 
-console.log "S3 : " + util.inspect(s3) + "\n"
+# console.log "S3 : " + util.inspect(s3) + "\n"
 
+###
 module.exports = (robot) ->
   robot.respond /listBuckets/i, (msg) ->
     console.log "list all buckets"
@@ -140,6 +141,31 @@ module.exports = (robot) ->
       res.send(new Buffer(thumb_data))
     else
       res.send(404)
+###
+
+module.exports = (robot) ->
+  robot.respond /wake up(.*)$/i, (msg) ->
+    status = if msg.match[1] then msg.match[1].trim() else null
+    robot.adapter.connector.setAvailability "", status
+    msg.send "I'm up!"
+
+  robot.respond /wake chat(.*)$/i, (msg) ->
+    status = if msg.match[1] then msg.match[1].trim() else null
+    robot.adapter.connector.setAvailability "chat", status
+    msg.send "meh!"
+
+  robot.respond /do not disturb(.*)$/i, (msg) ->
+    status = if msg.match[1] then msg.match[1].trim() else null
+    robot.adapter.connector.setAvailability "dnd", status
+    msg.send if status then status else "later"
+
+  robot.respond /go away(.*)$/i, (msg) ->
+    status = if msg.match[1] then msg.match[1].trim() else null
+    robot.adapter.connector.setAvailability "away", status
+    msg.send if status then status else "ciao"
+    delay 5000, () ->
+      robot.adapter.connector.setAvailability ""
+      msg.send "ok"
 
   robot.respond /(whois|who is|who\'s|where's|where is|where does) (.*)$/i, (msg) ->
     userID = msg.match[2].replace('?', '').replace(' sit', '')
@@ -171,20 +197,21 @@ module.exports = (robot) ->
     searchOpts =
       filter: chosenFilter
       scope: 'sub'
-      attributes: ['cn', 'title', 'department', 'mail', 'telephoneNumber', 'mobile', 'st', 'physicalDeliveryOfficeName', 'manager', 'directReports', 'sAMAccountName', 'thumbnailPhoto']
+      attributes: ['cn', 'title', 'mail', 'department', 'telephoneNumber', 'mobile', 'st', 'physicalDeliveryOfficeName', 'manager', 'sAMAccountName', 'thumbnailPhoto']
 
     resp_str = ''
     ldap_image_str = null
     hipchat_image_str = null
     gravatar_image_str = null
 
-    client.search 'OU=Earthlings,OU=People,DC=dealerdotcom,DC=corp', searchOpts, (err, res) ->
+    client.search 'OU=People,DC=dealerdotcom,DC=corp', searchOpts, (err, res) ->
       res.on 'searchEntry', (entry) ->
         resp_str += '\n'
 
         isDealerTrack = false
         department = ''
         email = ''
+        division = ''
         state = null
         address = null
 
@@ -205,18 +232,22 @@ module.exports = (robot) ->
             else if attr.type == 'department' and attrOrder == 'department'
               console.log "attr: " + JSON.stringify(attr) + "\n"
               department = attr.vals.join(',\n ')
-              if department == 'Dealertrack'
-                isDealerTrack = true
-                department = 'DealerTrack'
+              resp_str += 'Department: ' + department.trim()
 
-              resp_str += 'Department: ' + department + '\n'
+              if division != ''
+                resp_str += ', ' + division
+
+              resp_str += '\n'
 
             else if attr.type == 'mail' and attrOrder == 'mail'
               console.log "attr: " + JSON.stringify(attr) + "\n"
               email = attr.vals.join(',\n ')
 
-              if isDealerTrack
-                email = email.replace /dealer\.com/, "dealertrack.com"
+              if email.indexOf('dealertrack') > -1
+                isDealerTrack = true
+                division = 'Dealertrack, Inc.'
+              else if email.indexOf('dealer.com') > -1
+                division = 'Dealer.com'
 
               resp_str += 'Email: ' + email + '\n'
               email_hash = fairmont.md5(email.trim().toLowerCase())
@@ -299,26 +330,27 @@ module.exports = (robot) ->
 
             else if attr.type == 'st' and attrOrder == 'st'
               console.log "attr: " + JSON.stringify(attr) + "\n"
-              state = 'State: ' + attr.vals.join(',\n ') + '\n'
+              state = "State: " + attr.vals.join(',\n ') + '\n'
 
             else if attr.type == 'physicalDeliveryOfficeName' and attrOrder == 'physicalDeliveryOfficeName'
               console.log "attr: " + JSON.stringify(attr) + "\n"
-              [ state, city, address ] = attr.vals.join(',\n ').split(" > ")
-              address = "Location: #{address}, #{city}  #{state}\n"
+              physAddr = attr.vals.join(',\n ')
+              address = null
+              if (physAddr.indexOf('>') >= 0)
+                [ state, city, address ] = physAddr.split(" > ")
+                address = "Location: #{address}, #{city}  #{state}\n"
+              else
+                address = "Location: #{physAddr}\n"
 
               resp_str += address or state
 
             else if attr.type == 'manager' and attrOrder == 'manager'
               console.log "attr: " + JSON.stringify(attr) + "\n"
-              resp_str += 'Manager: ' + attr.vals.join(',\n ').replace('CN=', '').replace(',OU=Earthlings,OU=People,DC=dealerdotcom,DC=corp', '') + '\n'
-
-            else if attr.type == 'directReports' and attrOrder == 'directReports'
-              console.log "attr: " + JSON.stringify(attr) + "\n"
+              resp_str += 'Manager: ' + attr.vals.join(',\n ').replace('CN=', '').replace(',OU=Earthlings', '').replace(',OU=DealerTrack', '').replace(',OU=People,DC=dealerdotcom,DC=corp', '') + '\n'
 
             else if attr.type == 'sAMAccountName' and attrOrder == 'sAMAccountName' and isDealerTrack == false
               console.log "attr: " + JSON.stringify(attr) + "\n"
               resp_str += 'Map: http://maps.dealer.ddc/maps/locate/' + attr.vals.join(',\n ') + '\n'
-
 
       res.on 'end', (result) ->
         if resp_str == ''
@@ -363,7 +395,7 @@ module.exports = (robot) ->
       scope: 'sub'
 #      attributes: ['cn', 'title', 'department', 'mail', 'telephoneNumber', 'st', 'manager', 'sAMAccountName','thumbnailPhoto']
 
-    client.search 'OU=Earthlings,OU=People,DC=dealerdotcom,DC=corp', searchOpts, (err, res) ->
+    client.search 'OU=People,DC=dealerdotcom,DC=corp', searchOpts, (err, res) ->
       res.on 'searchEntry', (entry) ->
         resp_str = 'Information for earthling ' + userID + ':\n'
 
@@ -378,5 +410,5 @@ module.exports = (robot) ->
       res.on 'end', (result) ->
         if resp_str == ''
           msg.send 'No earthlings were found based on your search.'
-###
 
+###
